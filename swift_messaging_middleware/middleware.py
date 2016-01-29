@@ -20,6 +20,7 @@ import oslo_messaging
 import six
 from swift.common.swob import HTTPForbidden, HTTPBadRequest, \
     HTTPRequestEntityTooLarge, Request
+from swift.common.wsgi import make_env, make_pre_authed_env, make_pre_authed_request
 from swift.common import wsgi
 
 
@@ -30,6 +31,7 @@ class OsloMessagingContext(wsgi.WSGIContext):
     def __init__(self, app, notifier):
         wsgi.WSGIContext.__init__(self, app)
         self._notifier = notifier
+        self.agent = "%(orig)s OsloMessaging"
 
     def _timestamp_to_str(self, timestamp):
         dt = datetime.fromtimestamp(float(timestamp))
@@ -69,12 +71,21 @@ class OsloMessagingContext(wsgi.WSGIContext):
                 'x-trans-id': request_headers.get('X-Trans-Id')
         }
 
+    def _make_head_request(self, env):
+        tmp_req = make_pre_authed_request(env, method="HEAD")
+        resp = tmp_req.get_response(self.app)
+        return resp
+
     def handle_request(self, env, start_response):
         request = Request(env)
         method = request.method
         if method not in ('POST', 'PUT', 'COPY', 'DELETE'):
             return self.app(env, start_response)
 
+        # Get the response from the rest of the pipeline before we
+        # start doing anything; this means that whatever is being created
+        # or deleted will have been done before we start constructing
+        # the notification payload
         response = self._app_call(env)
         status_code = self._get_status_int()
 
@@ -101,12 +112,6 @@ class OsloMessagingContext(wsgi.WSGIContext):
 
         if status_code in (200, 201, 202, 204):
             request_headers = request.headers
-            #print ver, account, container, obj
-            #print dir(request)
-            #print request.__dict__
-            #print request.environ['PATH_INFO']
-            #print request.headers.items()
-            #print(self._response_headers)
 
             payload = self._get_request_auth_info(request_headers)
             payload['account'] = account
@@ -117,10 +122,12 @@ class OsloMessagingContext(wsgi.WSGIContext):
 
 
             if method != 'DELETE':
+                head_headers = self._make_head_request(env).headers
+
                 copy_from = request_headers.get('X-Copy-From')
                 if copy_from:
                     # Copies are turned into PUTs with an X-Copy-From in the object middleware
-                    print "Detected copy %s" % copy_from
+                    # though we don't need to handle them differently
                     event_type = event_methods['COPY']
                     if copy_from[0] == '/':
                         copy_from = copy_from[1:]
@@ -130,7 +137,7 @@ class OsloMessagingContext(wsgi.WSGIContext):
                     payload['copy_from_object'] = copy_from_object
 
                     if request_headers.get('X-Fresh-Metadata', None):
-                        payload['copy-fresh-metadata'] = bool(request_headers.get('X-Fresh-Metadata'))
+                        payload['copy_fresh_metadata'] = bool(request_headers.get('X-Fresh-Metadata'))
 
                 payload.update(self._get_account_metadata(request_headers, self._response_headers))
                 if container:
@@ -139,15 +146,21 @@ class OsloMessagingContext(wsgi.WSGIContext):
                     if obj:
                         payload.update(self._get_object_metadata(request_headers, self._response_headers))
 
-                modified_timestamp = request_headers.get('X-Timestamp')
+                modified_timestamp = head_headers.get('X-Timestamp')
                 if modified_timestamp:
                     modified_datetime = datetime.fromtimestamp(float(modified_timestamp))
                     payload['updated_at'] = modified_datetime.strftime('%Y-%m-%dT%H:%M:%S.%f')
 
-                if method in ('PUT', 'COPY'):
-                    payload['content_length'] = env['CONTENT_LENGTH']
+                last_modified = head_headers.get('Last-Modified')
+                if last_modified:
+                    payload['last_modified'] = last_modified
+                
+                content_length = head_headers.get('Content-Length')
+                if obj and content_length:
+                    payload['content_length'] = content_length
 
             self._notifier.info({}, event_type, payload)
+
 
         # We don't want to tamper with the response
         start_response(self._response_status,
