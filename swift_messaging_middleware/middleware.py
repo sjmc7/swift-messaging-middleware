@@ -39,12 +39,10 @@ class OsloMessagingContext(wsgi.WSGIContext):
 
     def _get_metadata(self, request_headers, prefix, include_remove=True):
         added_prefix = 'X-%s-Meta-' % prefix
-        removed_prefix = 'X-Remove-%s-Meta-' % prefix
  
         return {k.lower(): v 
                 for k, v in six.iteritems(request_headers) 
-                if k.startswith(added_prefix) or 
-                   (include_remove and k.startswith(removed_prefix))}
+                if k.startswith(added_prefix)}
 
     def _get_object_metadata(self, request_headers, response_headers):
         object_metadata = self._get_metadata(request_headers, 'Object')
