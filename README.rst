@@ -22,7 +22,7 @@ version 2.8.1.
 
 Configuration
 -------------
-To configure, in proxy-server.conf:
+To configure, in proxy-server.conf::
 
     [filter:notificationmiddleware]
     paste.filter_factory = swift_messaging_middleware.middleware:filter_factory
